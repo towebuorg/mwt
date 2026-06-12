@@ -1,0 +1,22 @@
+worktree_root: ./worktrees
+base_branch: main
+
+repos:
+  backend:
+    path: ./repos/backend
+    base_branch: main
+    branch: main
+    remotes:
+      origin: git@github.com:example/backend.git
+  frontend:
+    path: ./repos/frontend
+    base_branch: main
+    branch: main
+    remotes:
+      origin: git@github.com:example/frontend.git
+  infra:
+    path: ./repos/infra
+    base_branch: main
+    branch: main
+    remotes:
+      origin: git@github.com:example/infra.git
