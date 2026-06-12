@@ -9,6 +9,11 @@ It now covers two layers:
 - workspace management for discovering and aligning canonical repositories
 - worktree management for creating, inspecting, merging, and removing matching feature worktrees
 
+It is meant for teams that need a practical way to keep track of many related
+repositories: all repositories in a company workspace, only the active or
+important repositories for a selected group, or one application that is split
+across several repositories.
+
 Multi-repo operations are not atomic. `mwt` is intentionally explicit and Git-shaped.
 
 ## License
