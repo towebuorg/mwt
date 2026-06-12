@@ -140,7 +140,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 
 	root.AddCommand(&cobra.Command{
 		Use:   "clone URL [DIR]",
-		Short: "Clone a repository, sync config, and fetch the base branch",
+		Short: "Clone a project repository and initialize its configured repos",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, err := runClone(cmd.Context(), runnerFor(), global, args, cmd.OutOrStdout())
@@ -423,7 +423,7 @@ func runClone(ctx context.Context, runner git.Runner, global globalFlags, args [
 		return 2, errors.New("usage: mwt clone URL [DIR]")
 	}
 	url := args[0]
-	dir := ""
+	dir := inferCloneDir(url)
 	if len(args) == 2 {
 		dir = args[1]
 	}
@@ -431,10 +431,15 @@ func runClone(ctx context.Context, runner git.Runner, global globalFlags, args [
 	if err != nil {
 		return 1, err
 	}
-	cloneArgs := []string{"-C", cwd, "clone", url}
-	if dir != "" {
-		cloneArgs = append(cloneArgs, dir)
+	projectPath := dir
+	if !filepath.IsAbs(projectPath) {
+		projectPath = filepath.Join(cwd, projectPath)
 	}
+	if _, err := os.Stat(projectPath); err == nil {
+		return 1, fmt.Errorf("project path already exists: %s", projectPath)
+	}
+
+	cloneArgs := []string{"clone", url, projectPath}
 	if runner.Verbose && runner.Logger != nil {
 		runner.Logger("$ git %s", strings.Join(cloneArgs, " "))
 	}
@@ -442,20 +447,41 @@ func runClone(ctx context.Context, runner git.Runner, global globalFlags, args [
 	cmd.Stdout = stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return 1, fmt.Errorf("git clone failed: %w", err)
+		return 1, fmt.Errorf("clone project repository failed: %w", err)
 	}
 
-	cfg, err := config.Load(".", global.ConfigPath)
+	cfg, err := config.Load(projectPath, global.ConfigPath)
 	if err != nil {
-		return 1, fmt.Errorf("clone succeeded but config could not be loaded: %w", err)
+		return 1, fmt.Errorf("project cloned but config could not be loaded: %w", err)
 	}
-	root := filepath.Dir(cfg.FilePath)
-	report, err := mwt.SyncWorkspace(ctx, runner, root, cfg)
-	if err != nil {
-		return 1, err
+
+	for _, name := range sortedRepoNames(cfg.Repos) {
+		repo := cfg.Repos[name]
+		remoteURL, err := cloneRemoteURL(repo)
+		if err != nil {
+			return 1, fmt.Errorf("%s: %w", name, err)
+		}
+		if _, err := os.Stat(repo.Path); err == nil {
+			return 1, fmt.Errorf("%s: repo path already exists: %s", name, repo.Path)
+		}
+		if err := os.MkdirAll(filepath.Dir(repo.Path), 0o755); err != nil {
+			return 1, fmt.Errorf("%s: create parent directory: %w", name, err)
+		}
+		cloneRepoArgs := []string{"clone", remoteURL, repo.Path}
+		if runner.Verbose && runner.Logger != nil {
+			runner.Logger("$ git %s", strings.Join(cloneRepoArgs, " "))
+		}
+		repoCmd := exec.CommandContext(ctx, "git", cloneRepoArgs...)
+		repoCmd.Stdout = stdout
+		repoCmd.Stderr = os.Stderr
+		if err := repoCmd.Run(); err != nil {
+			return 1, fmt.Errorf("%s: clone configured repository failed: %w", name, err)
+		}
+		fmt.Fprintf(stdout, "cloned %s -> %s\n", name, repo.Path)
 	}
-	planner := mwt.Planner{Config: report.Config, Git: runner}
-	plan, err := planner.PlanFetch(ctx, report.Config.BaseBranch)
+
+	planner := mwt.Planner{Config: cfg, Git: runner}
+	plan, err := planner.PlanFetch(ctx, cfg.BaseBranch)
 	if err != nil {
 		return 1, err
 	}
@@ -465,7 +491,7 @@ func runClone(ctx context.Context, runner git.Runner, global globalFlags, args [
 	if err := planner.Config.Save(""); err != nil {
 		return 1, err
 	}
-	fmt.Fprintf(stdout, "cloned %s and synced workspace to %s\n", url, plan.Branch)
+	fmt.Fprintf(stdout, "cloned project %s -> %s and initialized %d repos on %s\n", url, projectPath, len(cfg.Repos), plan.Branch)
 	return 0, nil
 }
 
@@ -839,6 +865,33 @@ func sortedRepoNames(repos map[string]config.Repo) []string {
 	}
 	sortStrings(names)
 	return names
+}
+
+func inferCloneDir(url string) string {
+	trimmed := strings.TrimRight(url, "/")
+	if i := strings.LastIndexAny(trimmed, "/:"); i >= 0 {
+		trimmed = trimmed[i+1:]
+	}
+	trimmed = strings.TrimSuffix(trimmed, ".git")
+	if trimmed == "" || trimmed == "." {
+		return "mwt-project"
+	}
+	return trimmed
+}
+
+func cloneRemoteURL(repo config.Repo) (string, error) {
+	if len(repo.Remotes) == 0 {
+		return "", errors.New("no remotes configured")
+	}
+	if origin := repo.Remotes["origin"]; origin != "" {
+		return origin, nil
+	}
+	names := make([]string, 0, len(repo.Remotes))
+	for name := range repo.Remotes {
+		names = append(names, name)
+	}
+	sortStrings(names)
+	return repo.Remotes[names[0]], nil
 }
 
 func repoNameCompletion(global globalFlags) cobra.CompletionFunc {

@@ -124,9 +124,29 @@ If any repo is dirty, `mwt` asks for confirmation before a forced checkout. This
 
 ### `mwt clone URL [DIR]`
 
-Clones a new repository into the current workspace, runs `sync`, then runs `fetch` against the configured `base_branch` so the workspace returns to a common branch baseline.
+Clones a project repository that contains `mwt.yaml`, then initializes the
+workspace described by that config.
 
-`mwt` cannot change your parent shell directory, so “enter the directory” is handled internally as part of the clone-and-sync flow.
+The project repository is the shareable entrypoint for a multi-repo setup. It
+contains the `mwt.yaml` file with repo paths and remotes, but the application
+repositories remain independent.
+
+After cloning the project repository, `mwt`:
+
+- loads `mwt.yaml` from the cloned project
+- clones every configured repository from its recorded `origin` remote, or the
+  first configured remote when `origin` is absent
+- places each repository at its configured path
+- fetches every repository
+- checks every repository out to the configured `base_branch`
+
+Example:
+
+```bash
+mwt clone git@github.com:example/product-workspace.git
+cd product-workspace
+mwt create feature-auth
+```
 
 ### `mwt create NAME`
 
@@ -237,10 +257,10 @@ mwt init
 mwt fetch
 ```
 
-Add a new repo and realign everything:
+Clone a shared multi-repo project workspace:
 
 ```bash
-mwt clone git@github.com:example/payments.git
+mwt clone git@github.com:example/product-workspace.git
 ```
 
 Create a feature worktree set:
