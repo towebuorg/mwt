@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"github.com/guillermo/mwt/internal/config"
 	"github.com/guillermo/mwt/internal/git"
 	"github.com/guillermo/mwt/internal/mwt"
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,84 +41,12 @@ func SetBuildInfo(info BuildInfo) {
 }
 
 func Run(args []string, stdout, stderr io.Writer) (int, error) {
-	ctx := context.Background()
-	global, rest, err := parseGlobalFlags(args)
-	if err != nil {
-		return 2, err
+	root := newRootCommand(stdout, stderr)
+	root.SetArgs(args)
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		return 1, err
 	}
-	if len(rest) == 0 {
-		printUsage(stdout)
-		return 2, errors.New("missing command")
-	}
-	style := newStyle(stdout, global.NoColor)
-	logger := func(format string, args ...any) {
-		fmt.Fprintf(stderr, format+"\n", args...)
-	}
-	runner := git.Runner{
-		Verbose: global.Verbose,
-		Logger:  logger,
-	}
-
-	switch rest[0] {
-	case "version":
-		return runVersion(stdout)
-	case "init":
-		return runInit(ctx, runner, global, stdout)
-	case "sync":
-		return runSync(ctx, runner, global, stdout)
-	case "fetch":
-		return runFetch(ctx, runner, global, rest[1:], stdout)
-	case "clone":
-		return runClone(ctx, runner, global, rest[1:], stdout)
-	case "create":
-		planner, err := loadPlanner(global, runner)
-		if err != nil {
-			return 2, err
-		}
-		return runCreate(ctx, planner, rest[1:], stdout, stderr, style)
-	case "status":
-		planner, err := loadPlanner(global, runner)
-		if err != nil {
-			return 2, err
-		}
-		return runStatus(ctx, planner, rest[1:], stdout, style)
-	case "foreach":
-		planner, err := loadPlanner(global, runner)
-		if err != nil {
-			return 2, err
-		}
-		return runForeach(ctx, planner, rest[1:], stdout, stderr)
-	case "merge":
-		planner, err := loadPlanner(global, runner)
-		if err != nil {
-			return 2, err
-		}
-		return runMerge(ctx, planner, rest[1:], stdout, stderr, style)
-	case "remove":
-		planner, err := loadPlanner(global, runner)
-		if err != nil {
-			return 2, err
-		}
-		return runRemove(ctx, planner, rest[1:], stdout, style)
-	case "list":
-		planner, err := loadPlanner(global, runner)
-		if err != nil {
-			return 2, err
-		}
-		return runList(planner, stdout)
-	case "snapshot":
-		planner, err := loadPlanner(global, runner)
-		if err != nil {
-			return 2, err
-		}
-		return runSnapshot(ctx, planner, rest[1:], stdout)
-	case "help", "-h", "--help":
-		printUsage(stdout)
-		return 0, nil
-	default:
-		printUsage(stdout)
-		return 2, fmt.Errorf("unknown command %q", rest[0])
-	}
+	return 0, nil
 }
 
 func runVersion(stdout io.Writer) (int, error) {
@@ -137,18 +65,219 @@ func loadPlanner(global globalFlags, runner git.Runner) (mwt.Planner, error) {
 	}, nil
 }
 
-func parseGlobalFlags(args []string) (globalFlags, []string, error) {
+func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	var global globalFlags
-	fs := flag.NewFlagSet("mwt", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.StringVar(&global.ConfigPath, "config", "", "config file path")
-	fs.BoolVar(&global.NoColor, "no-color", false, "disable color output")
-	fs.BoolVar(&global.Verbose, "verbose", false, "print git commands")
-
-	if err := fs.Parse(args); err != nil {
-		return global, nil, err
+	styleFor := func() style { return newStyle(stdout, global.NoColor) }
+	runnerFor := func() git.Runner {
+		return git.Runner{
+			Verbose: global.Verbose,
+			Logger: func(format string, args ...any) {
+				fmt.Fprintf(stderr, format+"\n", args...)
+			},
+		}
 	}
-	return global, fs.Args(), nil
+	plannerFor := func() (mwt.Planner, error) {
+		return loadPlanner(global, runnerFor())
+	}
+
+	root := &cobra.Command{
+		Use:              "mwt",
+		Short:            "Coordinate Git worktrees across independent repositories",
+		SilenceUsage:     true,
+		SilenceErrors:    true,
+		TraverseChildren: true,
+	}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.PersistentFlags().StringVar(&global.ConfigPath, "config", "", "config file path")
+	root.PersistentFlags().BoolVar(&global.NoColor, "no-color", false, "disable color output")
+	root.PersistentFlags().BoolVar(&global.Verbose, "verbose", false, "print underlying Git commands")
+	_ = root.MarkPersistentFlagFilename("config", "yaml", "yml")
+
+	root.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := runVersion(cmd.OutOrStdout())
+			return err
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "init",
+		Short: "Discover Git repositories and write mwt.yaml",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := runInit(cmd.Context(), runnerFor(), global, cmd.OutOrStdout())
+			return err
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "sync",
+		Short: "Refresh configured repositories from the workspace",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := runSync(cmd.Context(), runnerFor(), global, cmd.OutOrStdout())
+			return err
+		},
+	})
+
+	fetchCmd := &cobra.Command{
+		Use:               "fetch [BRANCH]",
+		Short:             "Fetch all repositories and check out a shared branch",
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: branchCompletion(global),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			yes, _ := cmd.Flags().GetBool("yes")
+			_, err := runFetchCobra(cmd.Context(), runnerFor(), global, args, yes, cmd.OutOrStdout())
+			return err
+		},
+	}
+	fetchCmd.Flags().Bool("yes", false, "confirm checkout of dirty canonical repositories")
+	root.AddCommand(fetchCmd)
+
+	root.AddCommand(&cobra.Command{
+		Use:   "clone URL [DIR]",
+		Short: "Clone a repository, sync config, and fetch the base branch",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := runClone(cmd.Context(), runnerFor(), global, args, cmd.OutOrStdout())
+			return err
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "create NAME",
+		Short: "Create one feature worktree per configured repository",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			planner, err := plannerFor()
+			if err != nil {
+				return err
+			}
+			_, err = runCreate(cmd.Context(), planner, args, cmd.OutOrStdout(), stderr, styleFor())
+			return err
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:               "status NAME",
+		Short:             "Show status for a named multi-worktree",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: worktreeNameCompletion(global, runnerFor),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			planner, err := plannerFor()
+			if err != nil {
+				return err
+			}
+			_, err = runStatus(cmd.Context(), planner, args, cmd.OutOrStdout(), styleFor())
+			return err
+		},
+	})
+
+	foreachCmd := &cobra.Command{
+		Use:               "foreach NAME -- COMMAND...",
+		Short:             "Run a command inside each repo worktree",
+		Args:              cobra.MinimumNArgs(2),
+		ValidArgsFunction: worktreeNameCompletion(global, runnerFor),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			keepGoing, _ := cmd.Flags().GetBool("keep-going")
+			planner, err := plannerFor()
+			if err != nil {
+				return err
+			}
+			_, err = runForeachCobra(cmd.Context(), planner, args, keepGoing, cmd.OutOrStdout(), stderr)
+			return err
+		},
+	}
+	foreachCmd.Flags().Bool("keep-going", false, "continue after a repository command fails")
+	root.AddCommand(foreachCmd)
+
+	mergeCmd := &cobra.Command{
+		Use:               "merge NAME",
+		Short:             "Merge a named branch into each repo base branch",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: worktreeNameCompletion(global, runnerFor),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			planner, err := plannerFor()
+			if err != nil {
+				return err
+			}
+			allowDirty, _ := cmd.Flags().GetBool("allow-dirty")
+			yes, _ := cmd.Flags().GetBool("yes")
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			_, err = runMergeCobra(cmd.Context(), planner, args[0], allowDirty, yes, dryRun, cmd.OutOrStdout(), stderr, styleFor())
+			return err
+		},
+	}
+	mergeCmd.Flags().Bool("allow-dirty", false, "allow dirty worktrees during preflight")
+	mergeCmd.Flags().Bool("yes", false, "skip confirmation")
+	mergeCmd.Flags().Bool("dry-run", false, "validate and print without changing anything")
+	root.AddCommand(mergeCmd)
+
+	removeCmd := &cobra.Command{
+		Use:               "remove NAME",
+		Short:             "Remove all worktrees for a named multi-worktree",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: worktreeNameCompletion(global, runnerFor),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			planner, err := plannerFor()
+			if err != nil {
+				return err
+			}
+			force, _ := cmd.Flags().GetBool("force")
+			deleteBranches, _ := cmd.Flags().GetBool("delete-branches")
+			_, err = runRemoveCobra(cmd.Context(), planner, args[0], force, deleteBranches, cmd.OutOrStdout(), styleFor())
+			return err
+		},
+	}
+	removeCmd.Flags().Bool("force", false, "force removal of dirty worktrees")
+	removeCmd.Flags().Bool("delete-branches", false, "delete feature branches after removing worktrees")
+	root.AddCommand(removeCmd)
+
+	root.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List existing multi-worktrees",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			planner, err := plannerFor()
+			if err != nil {
+				return err
+			}
+			_, err = runList(planner, cmd.OutOrStdout())
+			return err
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:               "snapshot NAME",
+		Short:             "Print a lockfile-style commit snapshot",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: worktreeNameCompletion(global, runnerFor),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			planner, err := plannerFor()
+			if err != nil {
+				return err
+			}
+			_, err = runSnapshot(cmd.Context(), planner, args, cmd.OutOrStdout())
+			return err
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:               "repos [NAME...]",
+		Short:             "List configured repositories",
+		Args:              cobra.ArbitraryArgs,
+		ValidArgsFunction: repoNameCompletion(global),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := runRepos(global, args, cmd.OutOrStdout())
+			return err
+		},
+	})
+
+	return root
 }
 
 func runInit(ctx context.Context, runner git.Runner, global globalFlags, stdout io.Writer) (int, error) {
@@ -207,6 +336,49 @@ func runFetch(ctx context.Context, runner git.Runner, global globalFlags, args [
 			return 2, errors.New("usage: mwt fetch [BRANCH] [--yes]")
 		}
 		branch = arg
+	}
+	planner, err := loadPlanner(global, runner)
+	if err != nil {
+		return 2, err
+	}
+	plan, err := planner.PlanFetch(ctx, branch)
+	if err != nil {
+		return 1, err
+	}
+	var dirty []string
+	for _, repo := range plan.Repos {
+		fmt.Fprintf(stdout, "will fetch and checkout %s in %s (current: %s)\n", plan.Branch, repo.Name, repo.CurrentBranch)
+		if repo.Dirty {
+			dirty = append(dirty, repo.Name)
+		}
+	}
+	force := false
+	if len(dirty) > 0 {
+		if !yes {
+			ok, err := confirm(stdout, os.Stdin, fmt.Sprintf("dirty repos %s will be force-checked out; continue? [y/N]: ", strings.Join(dirty, ", ")))
+			if err != nil {
+				return 1, err
+			}
+			if !ok {
+				return 1, errors.New("fetch cancelled")
+			}
+		}
+		force = true
+	}
+	if err := planner.ExecuteFetch(ctx, plan, force); err != nil {
+		return 1, err
+	}
+	if err := planner.Config.Save(""); err != nil {
+		return 1, err
+	}
+	fmt.Fprintf(stdout, "fetched all repos and checked out %s\n", plan.Branch)
+	return 0, nil
+}
+
+func runFetchCobra(ctx context.Context, runner git.Runner, global globalFlags, args []string, yes bool, stdout io.Writer) (int, error) {
+	branch := ""
+	if len(args) > 0 {
+		branch = args[0]
 	}
 	planner, err := loadPlanner(global, runner)
 	if err != nil {
@@ -393,6 +565,29 @@ func runForeach(ctx context.Context, planner mwt.Planner, args []string, stdout,
 	return 0, nil
 }
 
+func runForeachCobra(ctx context.Context, planner mwt.Planner, args []string, keepGoing bool, stdout, stderr io.Writer) (int, error) {
+	if len(args) < 2 {
+		return 2, errors.New("usage: mwt foreach NAME -- COMMAND...")
+	}
+	name := args[0]
+	command := args[1:]
+	for _, repo := range plannerStatusOrder(planner, name) {
+		fmt.Fprintf(stdout, "[%s] %s\n", repo.Name, strings.Join(command, " "))
+		cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+		cmd.Dir = repo.WorktreePath
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		if err := cmd.Run(); err != nil {
+			if keepGoing {
+				fmt.Fprintf(stderr, "[%s] failed: %v\n", repo.Name, err)
+				continue
+			}
+			return 1, fmt.Errorf("%s: command failed: %w", repo.Name, err)
+		}
+	}
+	return 0, nil
+}
+
 func runMerge(ctx context.Context, planner mwt.Planner, args []string, stdout, stderr io.Writer, style style) (int, error) {
 	name, opts, err := parseMergeArgs(args)
 	if err != nil {
@@ -432,6 +627,38 @@ func runMerge(ctx context.Context, planner mwt.Planner, args []string, stdout, s
 	return 0, nil
 }
 
+func runMergeCobra(ctx context.Context, planner mwt.Planner, name string, allowDirty, yes, dryRun bool, stdout, stderr io.Writer, style style) (int, error) {
+	plan, err := planner.PlanMerge(ctx, name, allowDirty)
+	if err != nil {
+		return 1, err
+	}
+	fmt.Fprintln(stdout, "planned merges:")
+	for _, repo := range plan.Repos {
+		fmt.Fprintf(stdout, "  %s: %s -> %s\n", repo.Name, repo.FeatureBranch, repo.BaseBranch)
+	}
+	fmt.Fprintln(stdout, "note: merges across repositories are not atomic")
+	if dryRun {
+		return 0, nil
+	}
+	if !yes {
+		ok, err := confirm(stdout, os.Stdin, "continue? [y/N]: ")
+		if err != nil {
+			return 1, err
+		}
+		if !ok {
+			return 1, errors.New("merge cancelled")
+		}
+	}
+	if err := planner.ExecuteMerge(ctx, plan); err != nil {
+		fmt.Fprintf(stderr, "recovery: resolve conflicts in the reported repo, or abort with `git -C <repo> merge --abort`\n")
+		return 1, err
+	}
+	for _, repo := range plan.Repos {
+		fmt.Fprintf(stdout, "%s merged %s into %s for %s\n", style.ok("ok"), repo.FeatureBranch, repo.BaseBranch, repo.Name)
+	}
+	return 0, nil
+}
+
 func runRemove(ctx context.Context, planner mwt.Planner, args []string, stdout io.Writer, style style) (int, error) {
 	name, opts, err := parseRemoveArgs(args)
 	if err != nil {
@@ -441,6 +668,20 @@ func runRemove(ctx context.Context, planner mwt.Planner, args []string, stdout i
 		return 2, errors.New("usage: mwt remove NAME [--force] [--delete-branches]")
 	}
 	plan, err := planner.PlanRemove(ctx, name, opts.force, opts.deleteBranches)
+	if err != nil {
+		return 1, err
+	}
+	if err := planner.ExecuteRemove(ctx, plan); err != nil {
+		return 1, err
+	}
+	for _, repo := range plan.Repos {
+		fmt.Fprintf(stdout, "%s %s\n", style.ok("removed"), repo.WorktreePath)
+	}
+	return 0, nil
+}
+
+func runRemoveCobra(ctx context.Context, planner mwt.Planner, name string, force, deleteBranches bool, stdout io.Writer, style style) (int, error) {
+	plan, err := planner.PlanRemove(ctx, name, force, deleteBranches)
 	if err != nil {
 		return 1, err
 	}
@@ -479,6 +720,33 @@ func runSnapshot(ctx context.Context, planner mwt.Planner, args []string, stdout
 	_, err = stdout.Write(data)
 	if err != nil {
 		return 1, err
+	}
+	return 0, nil
+}
+
+func runRepos(global globalFlags, args []string, stdout io.Writer) (int, error) {
+	cfg, err := config.Load(".", global.ConfigPath)
+	if err != nil {
+		return 1, err
+	}
+	requested := map[string]struct{}{}
+	for _, name := range args {
+		requested[name] = struct{}{}
+	}
+	names := sortedRepoNames(cfg.Repos)
+	for _, name := range names {
+		if len(requested) > 0 {
+			if _, ok := requested[name]; !ok {
+				continue
+			}
+		}
+		repo := cfg.Repos[name]
+		fmt.Fprintf(stdout, "%-12s %-12s %s\n", name, repo.Branch, repo.Path)
+	}
+	for name := range requested {
+		if _, ok := cfg.Repos[name]; !ok {
+			return 1, fmt.Errorf("repo %q is not configured", name)
+		}
 	}
 	return 0, nil
 }
@@ -571,6 +839,84 @@ func sortedRepoNames(repos map[string]config.Repo) []string {
 	}
 	sortStrings(names)
 	return names
+}
+
+func repoNameCompletion(global globalFlags) cobra.CompletionFunc {
+	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		cfg, err := config.Load(".", global.ConfigPath)
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		used := map[string]struct{}{}
+		for _, arg := range args {
+			used[arg] = struct{}{}
+		}
+		var completions []string
+		for _, name := range sortedRepoNames(cfg.Repos) {
+			if _, ok := used[name]; ok {
+				continue
+			}
+			if !strings.HasPrefix(name, toComplete) {
+				continue
+			}
+			completions = append(completions, fmt.Sprintf("%s\t%s", name, cfg.Repos[name].Path))
+		}
+		return completions, cobra.ShellCompDirectiveNoFileComp
+	}
+}
+
+func worktreeNameCompletion(global globalFlags, runnerFor func() git.Runner) cobra.CompletionFunc {
+	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		planner, err := loadPlanner(global, runnerFor())
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		names, err := planner.List()
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		var completions []string
+		for _, name := range names {
+			if strings.HasPrefix(name, toComplete) {
+				completions = append(completions, name)
+			}
+		}
+		return completions, cobra.ShellCompDirectiveNoFileComp
+	}
+}
+
+func branchCompletion(global globalFlags) cobra.CompletionFunc {
+	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		cfg, err := config.Load(".", global.ConfigPath)
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		branches := map[string]struct{}{}
+		runner := git.Runner{}
+		for _, repo := range cfg.Repos {
+			output, err := runner.Output(cmd.Context(), repo.Path, "branch", "--format", "%(refname:short)")
+			if err != nil {
+				continue
+			}
+			for _, branch := range strings.Fields(output) {
+				if strings.HasPrefix(branch, toComplete) {
+					branches[branch] = struct{}{}
+				}
+			}
+		}
+		names := make([]string, 0, len(branches))
+		for branch := range branches {
+			names = append(names, branch)
+		}
+		sortStrings(names)
+		return names, cobra.ShellCompDirectiveNoFileComp
+	}
 }
 
 func joinOrNone(values []string) string {

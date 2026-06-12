@@ -74,6 +74,14 @@ homebrew_casks:
       - mwt
     binaries:
       - mwt
+    generate_completions_from_executable:
+      executable: mwt
+      args:
+        - completion
+      shells:
+        - bash
+        - zsh
+        - fish
     repository:
       owner: towebuorg
       name: homebrew-tap

@@ -98,6 +98,13 @@ Re-discovers repositories under the current directory and updates the config.
 - existing repos have branch and remote metadata refreshed
 - removed repos are dropped from the config
 
+### `mwt repos [NAME...]`
+
+Lists configured repositories. When names are provided, only those repos are
+shown.
+
+This command also provides shell completion for configured repository names.
+
 ### `mwt fetch [BRANCH] [--yes]`
 
 Fetches all configured canonical repositories:
@@ -254,6 +261,25 @@ mwt remove feature-auth
 - `--verbose`: print underlying Git commands
 - `--no-color`: disable ANSI colors
 
+## Shell Completion
+
+`mwt` uses Cobra and includes completion generation for Bash, Zsh, Fish, and
+PowerShell:
+
+```bash
+mwt completion bash
+mwt completion zsh
+mwt completion fish
+mwt completion powershell
+```
+
+Homebrew cask installs generate Bash, Zsh, and Fish completion files from the
+installed executable automatically.
+
+Completions include command names, flags, configured repository names for
+`mwt repos`, existing multi-worktree names for worktree commands, and local
+branch names for `mwt fetch`.
+
 ## Releasing
 
 Releases are managed by GoReleaser in `.goreleaser.yaml` and GitHub Actions in `.github/workflows/release.yml`.
@@ -274,6 +300,7 @@ The release workflow:
 - builds a changelog from commits
 - publishes a GitHub release in `towebuorg/mwt`
 - updates the Homebrew cask in `towebuorg/homebrew-tap`
+- generates shell completion files for Homebrew-managed installs
 
 The Homebrew tap repository is `towebuorg/homebrew-tap`. Before the first release, add a repository secret named `HOMEBREW_TAP_GITHUB_TOKEN` to `towebuorg/mwt`. The token needs permission to push to the tap repository.
 
